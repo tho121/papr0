@@ -107,9 +107,6 @@ class SJC_0(BaseConf):
     prefix:             str = 'exp'
     nerf_path:          str = "data/nerf_wild"
 
-    papr_model:         PAPR = None
-    papr_losses:        None
-
     @validator("vox")
     def check_vox(cls, vox_cfg, values):
         family = values['family']
@@ -117,7 +114,7 @@ class SJC_0(BaseConf):
             vox_cfg.c = 4
         return vox_cfg
 
-    def run(self):
+    def ready(self):
         cfgs = self.dict()
 
         family = cfgs.pop("family")
@@ -129,17 +126,15 @@ class SJC_0(BaseConf):
         cfgs.pop("pose")
         poser = self.pose.make()
 
-        if self.papr_model:
-            #TODO: add vox model parameters to self.papr_model optimizers
-            pass
+        return cfgs, model, vox, poser
 
-        sjc_3d(**cfgs, poser=poser, model=model, vox=vox, 
-               papr_model=self.papr_model, papr_losses=self.papr_losses, papr_args=self.papr_args)
+        #sjc_3d(**cfgs, poser=poser, model=model, vox=vox, 
+        #       papr_model=self.papr_model, papr_losses=self.papr_losses, papr_args=self.papr_args)
 
-    def set_papr_model(self, papr_model, papr_losses, papr_args):
-        self.papr_model = papr_model
-        self.papr_losses = papr_losses
-        self.papr_args = papr_args
+    #def set_papr_model(self, papr_model, papr_losses, papr_args):
+    #    self.papr_model = papr_model
+    #    self.papr_losses = papr_losses
+    #    self.papr_args = papr_args
 
 def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_args,
     lr, n_steps, emptiness_scale, emptiness_weight, emptiness_step, emptiness_multiplier,
@@ -539,9 +534,9 @@ if __name__ == "__main__":
 
     papr_model, papr_losses = create_papr(config, eval_config, args.resume)
 
+    ###############################
 
     seed_everything(0)
-
 
     zero123_cfg = optional_load_config()
     zero123_cfg = SJC_0(**zero123_cfg).dict()
@@ -551,10 +546,12 @@ if __name__ == "__main__":
 
     write_full_config(mod)
 
-    mod.set_papr_model(papr_model, papr_losses, args)
+    zero123_cfg, zero123_model, vox, poser = mod.ready()
 
-    #mod.run()
+    sjc_3d(**zero123_cfg, poser=poser, model=zero123_model, vox=vox, 
+               papr_model=papr_model, papr_losses=papr_losses, papr_args=args)
 
 
-    ###############################
+
+    
     
