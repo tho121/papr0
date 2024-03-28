@@ -1,3 +1,6 @@
+Use venv with Python 3.9:
+https://stackoverflow.com/questions/70422866/how-to-create-a-venv-with-a-different-python-version
+
 Follow install instructions for zero123:
 https://github.com/cvlab-columbia/zero123
 
