@@ -538,7 +538,7 @@ if __name__ == "__main__":
 
     seed_everything(0)
 
-    zero123_cfg = optional_load_config()
+    zero123_cfg = optional_load_config("pikachu_config.yml")
     zero123_cfg = SJC_0(**zero123_cfg).dict()
 
     #cfg = argparse_cfg_template(cfg)  # cmdline takes priority

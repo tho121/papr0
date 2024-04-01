@@ -13,7 +13,7 @@ from adapt import ScoreAdapter
 from PIL import Image
 import requests
 import sys
-sys.path.append('../papr/zero123')
+sys.path.append('../papr0/zero123')
 
 import warnings
 from transformers import logging
@@ -54,8 +54,8 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 def load_objaverse_model(ckpt_root):
-    ckpt_fname = '../papr/zero123/105000.ckpt'
-    cfg_fname = '../papr/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml'
+    ckpt_fname = '../papr0/zero123/105000.ckpt'
+    cfg_fname = '../papr0/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml'
     H, W = 256, 256
 
     config = OmegaConf.load(str(cfg_fname))
