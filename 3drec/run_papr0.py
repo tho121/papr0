@@ -193,6 +193,8 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
                 transforms.CenterCrop((256, 256))
             ])
 
+            papr_tforms = transforms.Resize((H, W))
+
             input_im = tforms(input_image)
 
             # get input embedding
@@ -281,8 +283,12 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
 
             depth_value = depth.clone()
 
+            with torch.no_grad():
+                papr_y = model.decode(y)
+                papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
+
             #forward pass on PAPR here                
-            papr_train_and_eval(0, papr_model, model.device, [[y, ro, rd, poses[i]]], papr_losses, papr_args)
+            papr_train_and_eval(0, papr_model, model.device, [[papr_y.detach(), ro[0], rd.view(1, H, W, 3), poses[i]]], papr_losses, papr_args)
 
             if i % grad_accum == (grad_accum-1):
                 opt.step()
@@ -489,7 +495,7 @@ def papr_train_and_eval(start_step, model, device, data, losses, args):
     print("Training finished!")
 
 def train_step(step, model, batch, loss_fn, args):
-    tgt, rayd, rayo, c2w = batch
+    tgt, rayo, rayd, c2w = batch
 
     #rayo = rayo.to(device)
     #rayd = rayd.to(device)
@@ -549,7 +555,7 @@ if __name__ == "__main__":
     zero123_cfg, zero123_model, vox, poser = mod.ready()
 
     sjc_3d(**zero123_cfg, poser=poser, model=zero123_model, vox=vox, 
-               papr_model=papr_model, papr_losses=papr_losses, papr_args=args)
+               papr_model=papr_model, papr_losses=papr_losses, papr_args=config)
 
 
 
