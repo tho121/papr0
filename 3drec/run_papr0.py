@@ -136,6 +136,8 @@ class SJC_0(BaseConf):
     #    self.papr_losses = papr_losses
     #    self.papr_args = papr_args
 
+papr_batch_size = 8
+
 def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_args,
     lr, n_steps, emptiness_scale, emptiness_weight, emptiness_step, emptiness_multiplier,
     depth_weight, var_red, train_view, scene, index, view_weight, prefix, nerf_path, \
@@ -200,6 +202,11 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
             # get input embedding
             model.clip_emb = model.model.get_learned_conditioning(input_im.float()).tile(1,1,1).detach()
             model.vae_emb = model.model.encode_first_stage(input_im.float()).mode().detach()
+
+        papr_y_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float16, device=papr_model.device)
+        papr_ro_batch = torch.empty((papr_batch_size, 3), dtype=torch.float32, device=papr_model.device)
+        papr_rd_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float32, device=papr_model.device)
+        papr_c2w_batch = np.empty((papr_batch_size, 4, 4), dtype=np.float64)
 
         for i in range(n_steps):
             if fuse.on_break():
@@ -287,8 +294,16 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
                 papr_y = model.decode(y)
                 papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
 
-            #forward pass on PAPR here                
-            papr_train_and_eval(0, papr_model, model.device, [[papr_y.detach(), ro[0], rd.view(1, H, W, 3), poses[i]]], papr_losses, papr_args)
+            papr_batch_i = i % papr_batch_size
+            papr_y_batch[papr_batch_i] = papr_y.detach()
+            papr_ro_batch[papr_batch_i] = ro[0].detach()
+            papr_rd_batch[papr_batch_i] = rd.view(H, W, 3).detach()
+            papr_c2w_batch[papr_batch_i] = poses[i]
+
+            if i % papr_batch_size == (papr_batch_size - 1):
+                
+                #forward pass on PAPR here                
+                papr_train_and_eval(0, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_args)
 
             if i % grad_accum == (grad_accum-1):
                 opt.step()
@@ -505,7 +520,7 @@ def train_step(step, model, batch, loss_fn, args):
     model.clear_grad()
     out = model(rayo, rayd, c2w, step)
     out = model.last_act(out)
-    loss = loss_fn(out, tgt)
+    loss = loss_fn(out, tgt.to(torch.float32))
     model.scaler.scale(loss).backward()
     model.step(step)
     if args.scaler_min_scale > 0 and model.scaler.get_scale() < args.scaler_min_scale:

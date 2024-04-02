@@ -15,7 +15,7 @@ class BasicLoss(nn.Module):
         for name_and_weight, loss_func in self.losses_and_weights.items():
             name, weight = name_and_weight.split('/')
             cur_loss = loss_func(pred, target)
-            loss += float(weight) * cur_loss
+            loss += float(weight) * cur_loss.mean()
             # print(name, weight, cur_loss, loss)
         return loss
 
