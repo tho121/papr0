@@ -137,6 +137,8 @@ class SJC_0(BaseConf):
     #    self.papr_args = papr_args
 
 papr_batch_size = 8
+papr_steps_per_it = 1000
+papr_train_interval = 100
 
 def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_args,
     lr, n_steps, emptiness_scale, emptiness_weight, emptiness_step, emptiness_multiplier,
@@ -184,6 +186,19 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
 
     opt.zero_grad()
 
+    papr_loss_fn = get_loss(papr_args.training.losses)
+    papr_loss_fn = papr_loss_fn.to(papr_model.device)
+
+    papr_log_dir = os.path.join(papr_args.save_dir, papr_args.index)
+    os.makedirs(os.path.join(papr_log_dir, "test"), exist_ok=True)
+    papr_log_dir = os.path.join(papr_log_dir, "test")
+
+    papr_y_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float16, device=papr_model.device)
+    papr_ro_batch = torch.empty((papr_batch_size, 3), dtype=torch.float32, device=papr_model.device)
+    papr_rd_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float32, device=papr_model.device)
+    papr_c2w_batch = np.empty((papr_batch_size, 4, 4), dtype=np.float64)
+    papr_steps = 0
+
     with tqdm(total=n_steps) as pbar, \
         HeartBeat(pbar) as hbeat, \
             EventStorage(folder_name) as metric:
@@ -202,11 +217,6 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
             # get input embedding
             model.clip_emb = model.model.get_learned_conditioning(input_im.float()).tile(1,1,1).detach()
             model.vae_emb = model.model.encode_first_stage(input_im.float()).mode().detach()
-
-        papr_y_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float16, device=papr_model.device)
-        papr_ro_batch = torch.empty((papr_batch_size, 3), dtype=torch.float32, device=papr_model.device)
-        papr_rd_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float32, device=papr_model.device)
-        papr_c2w_batch = np.empty((papr_batch_size, 4, 4), dtype=np.float64)
 
         for i in range(n_steps):
             if fuse.on_break():
@@ -290,20 +300,22 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
 
             depth_value = depth.clone()
 
-            with torch.no_grad():
-                papr_y = model.decode(y)
-                papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
+            #batch data for PAPR, forward pass when batch filled
+            if papr_train_interval - (i % papr_train_interval) < papr_batch_size:
+                with torch.no_grad():
+                    papr_y = model.decode(y)
+                    papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
 
-            papr_batch_i = i % papr_batch_size
-            papr_y_batch[papr_batch_i] = papr_y.detach()
-            papr_ro_batch[papr_batch_i] = ro[0].detach()
-            papr_rd_batch[papr_batch_i] = rd.view(H, W, 3).detach()
-            papr_c2w_batch[papr_batch_i] = poses[i]
+                papr_batch_i = (i % papr_train_interval) % papr_batch_size
+                papr_y_batch[papr_batch_i] = papr_y.detach()
+                papr_ro_batch[papr_batch_i] = ro[0].detach()
+                papr_rd_batch[papr_batch_i] = rd.view(H, W, 3).detach()
+                papr_c2w_batch[papr_batch_i] = poses[i]
 
-            if i % papr_batch_size == (papr_batch_size - 1):
-                
-                #forward pass on PAPR here                
-                papr_train_and_eval(0, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_args)
+            if (i + 1) % papr_train_interval == 0:
+                target_step = papr_steps + papr_steps_per_it
+                papr_train_and_eval(papr_steps, target_step, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_loss_fn, papr_log_dir, papr_args)
+                papr_steps += papr_steps_per_it
 
             if i % grad_accum == (grad_accum-1):
                 opt.step()
@@ -387,16 +399,16 @@ def create_papr(args, eval_args, resume):
         
     return model, losses
 
-def papr_train_and_eval(start_step, model, device, data, losses, args):
+def papr_train_and_eval(start_step, target_step, model, device, data, losses, loss_fn, log_dir, args):
     #TODO: losses = [[], [], []] ??
 
 
-    loss_fn = get_loss(args.training.losses)
-    loss_fn = loss_fn.to(device)
+    #loss_fn = get_loss(args.training.losses)
+    #loss_fn = loss_fn.to(device)
 
-    log_dir = os.path.join(args.save_dir, args.index)
-    os.makedirs(os.path.join(log_dir, "test"), exist_ok=True)
-    log_dir = os.path.join(log_dir, "test")
+    #log_dir = os.path.join(args.save_dir, args.index)
+    #os.makedirs(os.path.join(log_dir, "test"), exist_ok=True)
+    #log_dir = os.path.join(log_dir, "test")
 
     #steps = []
     #train_losses, eval_losses, eval_psnrs = losses
@@ -407,11 +419,10 @@ def papr_train_and_eval(start_step, model, device, data, losses, args):
     step = start_step
     eval_step_cnt = start_step
     pruned = False
-    pc_frames = []
 
-    print("Start step:", start_step, "Total steps:", args.training.steps)
+    print("Start step:", start_step, "Total steps:", target_step)
     start_time = time.time()
-    while step < args.training.steps:
+    while step < target_step:
         for _, batch in enumerate(data):
             if (args.training.prune_steps > 0) and (step < args.training.prune_stop) and (step >= args.training.prune_start):
                 if len(args.training.prune_steps_list) > 0 and step % args.training.prune_steps == 0:
@@ -495,17 +506,15 @@ def papr_train_and_eval(start_step, model, device, data, losses, args):
                 if model.points_influ_scores is not None:
                     points_influ_scores_np = model.points_influ_scores.squeeze().detach().cpu().numpy()
                 pcd_plot = get_training_pcd_single_plot(step, points_np, pt_plot_scale, points_influ_scores_np)
-                pc_frames.append(pcd_plot)
+  
+                image_path = os.path.join(pc_dir, f"pc_frame_step_{step}.png")
+                pcd_plot.save(image_path)
                 
                 if step == 1:
                     pcd_plot.save(os.path.join(pc_dir, "init_pcd.png"))
 
-            if step >= args.training.steps:
+            if step >= target_step:
                 break
-
-    if args.eval.save_fig and pc_frames != []:
-        f = os.path.join(log_dir, f"{args.index}-pc.mp4")
-        imageio.mimwrite(f, pc_frames, fps=30, quality=10)
 
     print("Training finished!")
 
