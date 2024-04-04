@@ -1,4 +1,4 @@
-index: "chair"
+index: "pikachu"
 load_path: ""
 save_dir: "./experiments"
 seed: 1
@@ -14,7 +14,7 @@ dataset:
   coord_scale: 10.0
   type: "synthetic"
   white_bg: true
-  path: "./data/nerf_synthetic/chair/"
+  path: "./data/nerf_wild/pikachu/"
   factor: 1
   batch_size: 1
   num_workers: 0
@@ -237,25 +237,25 @@ training:
       type: "none"
       base_lr: 0.0
       factor: 1
-      warmup: 10000
+      warmup: 5000
       weight_decay: 0
     points_influ_scores:
       type: "cosine-hlfperiod"
       base_lr: 1.0e-3
       factor: 1
-      warmup: 10000
+      warmup: 5000
       weight_decay: 0
     feats: 
       type: "cosine-hlfperiod"
       base_lr: 1.0e-3
       factor: 1
-      warmup: 10000
+      warmup: 5000
       weight_decay: 0
     generator:
       type: "cosine-hlfperiod"
       base_lr: 1.0e-4
       factor: 1
-      warmup: 10000
+      warmup: 5000
       weight_decay: 0
 eval:
   dataset:
@@ -264,7 +264,7 @@ eval:
     extract_patch: false
     type: "synthetic"
     white_bg: true
-    path: "./data/nerf_synthetic/chair/"
+    path: "./data/nerf_wild/pikachu/"
     factor: 1
     num_workers: 0
     num_slices: -1
@@ -286,7 +286,7 @@ test:
       extract_patch: false
       type: "synthetic"
       white_bg: true
-      path: "./data/nerf_synthetic/chair/"
+      path: "./data/nerf_wild/pikachu/"
       factor: 1
       num_workers: 0
       num_slices: -1

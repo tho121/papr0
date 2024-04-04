@@ -469,7 +469,7 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                     model.added_points = True
                     print("Step %d: Added %d points" % (step, num_added))
 
-            loss, out = train_step(step, model, batch, loss_fn, args)
+            loss, out, tgt = train_step(step, model, batch, loss_fn, args)
             avg_train_loss += loss
             step += 1
             eval_step_cnt += 1
@@ -493,10 +493,27 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
             if ((step - 1) % 200 == 0) and args.eval.save_fig:
                 coord_scale = args.dataset.coord_scale
                 pt_plot_scale = 0.8 * coord_scale
-                if "Barn" in args.dataset.path:
-                    pt_plot_scale *= 1.5
-                if "Family" in args.dataset.path:
-                    pt_plot_scale *= 0.5    
+                
+                img_dir = os.path.join(log_dir, "images")
+                os.makedirs(img_dir, exist_ok=True)
+                out_path = os.path.join(img_dir, f"out_frame_step_{step}.jpg")
+
+                #Save model output and target images
+                img1 = Image.fromarray((out[0] * 255).astype('uint8'))
+                img2 = Image.fromarray((tgt[0] * 255).astype('uint8'))
+
+                width1, height1 = img1.size
+                width2, height2 = img2.size
+                total_width = width1 + width2
+                max_height = max(height1, height2)
+
+                combined_image = Image.new('RGB', (total_width, max_height), (255, 255, 255))
+                combined_image.paste(img1, (0, 0))
+                combined_image.paste(img2, (width1, 0))
+
+                combined_image.save(out_path)
+
+                #save images of point cloud
 
                 pc_dir = os.path.join(log_dir, "point_clouds")
                 os.makedirs(pc_dir, exist_ok=True)
@@ -510,8 +527,6 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                 image_path = os.path.join(pc_dir, f"pc_frame_step_{step}.png")
                 pcd_plot.save(image_path)
                 
-                if step == 1:
-                    pcd_plot.save(os.path.join(pc_dir, "init_pcd.png"))
 
             if step >= target_step:
                 break
@@ -521,15 +536,12 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
 def train_step(step, model, batch, loss_fn, args):
     tgt, rayo, rayd, c2w = batch
 
-    #rayo = rayo.to(device)
-    #rayd = rayd.to(device)
-    #tgt = tgt.to(device)
-    #c2w = c2w.to(device)
+    tgt = tgt.to(torch.float32)
 
     model.clear_grad()
     out = model(rayo, rayd, c2w, step)
     out = model.last_act(out)
-    loss = loss_fn(out, tgt.to(torch.float32))
+    loss = loss_fn(out, tgt)
     model.scaler.scale(loss).backward()
     model.step(step)
     if args.scaler_min_scale > 0 and model.scaler.get_scale() < args.scaler_min_scale:
@@ -537,7 +549,8 @@ def train_step(step, model, batch, loss_fn, args):
     else:
         model.scaler.update()
 
-    return loss.item(), out.detach().cpu().numpy()
+    return loss.item(), out.detach().cpu().numpy(), tgt.detach().cpu().numpy()
+
 
 if __name__ == "__main__":
 

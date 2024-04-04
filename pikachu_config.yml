@@ -7,7 +7,7 @@ sd:
   scale: 100.0
   precision: autocast
 lr: 0.05
-n_steps: 2000
+n_steps: 5000
 vox:
   model_type: V_SD
   bbox_len: 1.0
