@@ -136,9 +136,12 @@ class SJC_0(BaseConf):
     #    self.papr_losses = papr_losses
     #    self.papr_args = papr_args
 
-papr_batch_size = 8
+papr_batch_size = 12
 papr_steps_per_it = 1000
-papr_train_interval = 100
+papr_train_interval = 500
+
+#1000 zero it = 2000 papr it
+#5000 zeri it = 10000 papr it
 
 def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_args,
     lr, n_steps, emptiness_scale, emptiness_weight, emptiness_step, emptiness_multiplier,
@@ -197,6 +200,14 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
     papr_ro_batch = torch.empty((papr_batch_size, 3), dtype=torch.float32, device=papr_model.device)
     papr_rd_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float32, device=papr_model.device)
     papr_c2w_batch = np.empty((papr_batch_size, 4, 4), dtype=np.float64)
+
+    coord_scale = papr_args.dataset.coord_scale
+    scaling_matrix = torch.tensor([[coord_scale, 0, 0, 0],
+                                           [0, coord_scale, 0, 0],
+                                           [0, 0, coord_scale, 0],
+                                           [0, 0, 0, 1]], dtype=torch.float32, device=papr_model.device)
+    np_scaling_matrix = scaling_matrix.cpu().numpy()
+    
     papr_steps = 0
 
     with tqdm(total=n_steps) as pbar, \
@@ -209,6 +220,23 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
                 transforms.Resize(256),
                 transforms.CenterCrop((256, 256))
             ])
+
+            #TODO: resize to target rayd size
+            
+            '''
+            import torch.nn.functional as F
+
+            # Assuming rd_ is a tensor with shape [32, 32, 3], we transpose it to [3, 32, 32]
+            rd_ = rd_.permute(2, 0, 1).unsqueeze(0)
+
+            # Now rd_ has a shape of [1, 3, 32, 32], which is [batch_size, channels, height, width]
+            # Use interpolate to resize it to [1, 3, 256, 256]
+            rd_expanded = F.interpolate(rd_, size=(256, 256), mode='bilinear', align_corners=False)
+
+            # After interpolation, we remove the batch dimension and transpose back to [256, 256, 3]
+            rd_expanded = rd_expanded.squeeze(0).permute(1, 2, 0)
+            '''
+
 
             papr_tforms = transforms.Resize((H, W))
 
@@ -227,7 +255,7 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
                 # supervise with input view
                 # if i < 100 or i % 10 == 0:
                 with torch.enable_grad():
-                    y_, depth_, _, _, ws_ = render_one_view(vox, aabb, H, W, input_K, input_pose, return_w=True)
+                    y_, depth_, ro_, rd_, ws_ = render_one_view(vox, aabb, H, W, input_K, input_pose, return_w=True)
                     y_ = model.decode(y_)
                 rgb_loss = ((y_ - input_image) ** 2).mean()
 
@@ -308,11 +336,25 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
 
                 papr_batch_i = (i % papr_train_interval) % papr_batch_size
                 papr_y_batch[papr_batch_i] = papr_y.detach()
-                papr_ro_batch[papr_batch_i] = ro[0].detach()
+
+                ro_homogeneous = torch.cat((ro[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
+                ro_scaled = torch.matmul(scaling_matrix, ro_homogeneous.unsqueeze(-1)).squeeze(-1)
+
+                papr_ro_batch[papr_batch_i] = ro_scaled[:3]
                 papr_rd_batch[papr_batch_i] = rd.view(H, W, 3).detach()
-                papr_c2w_batch[papr_batch_i] = poses[i]
+                papr_c2w_batch[papr_batch_i] = np.dot(np_scaling_matrix, poses[i])
 
             if (i + 1) % papr_train_interval == 0:
+
+                papr_y_batch[0] = papr_tforms(input_image).permute(0, 2, 3, 1).detach()
+
+                ro_homogeneous_ = torch.cat((ro_[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
+                ro_scaled_ = torch.matmul(scaling_matrix, ro_homogeneous_.unsqueeze(-1)).squeeze(-1)
+
+                papr_ro_batch[0] = ro_scaled_[:3]
+                papr_rd_batch[0] = rd_.view(H, W, 3).detach()
+                papr_c2w_batch[0] = np.dot(np_scaling_matrix, input_pose)
+
                 target_step = papr_steps + papr_steps_per_it
                 papr_train_and_eval(papr_steps, target_step, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_loss_fn, papr_log_dir, papr_args)
                 papr_steps += papr_steps_per_it
@@ -400,20 +442,16 @@ def create_papr(args, eval_args, resume):
     return model, losses
 
 def papr_train_and_eval(start_step, target_step, model, device, data, losses, loss_fn, log_dir, args):
-    #TODO: losses = [[], [], []] ??
 
-
-    #loss_fn = get_loss(args.training.losses)
-    #loss_fn = loss_fn.to(device)
-
-    #log_dir = os.path.join(args.save_dir, args.index)
-    #os.makedirs(os.path.join(log_dir, "test"), exist_ok=True)
-    #log_dir = os.path.join(log_dir, "test")
-
-    #steps = []
+    steps = []
     #train_losses, eval_losses, eval_psnrs = losses
-    #pt_lrs = []
-    #tx_lrs = []
+
+    train_losses = []
+    eval_losses = []
+    eval_psnrs = []
+
+    pt_lrs = []
+    tx_lrs = []
 
     avg_train_loss = 0.
     step = start_step
@@ -479,16 +517,17 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                 print("Train step:", step, "loss:", loss, "tx_lr:", model.tx_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
                 start_time = time.time()
 
-            '''
             if (step % args.eval.step == 0) or (step % 500 == 0 and step < 10000):
                 train_losses.append(avg_train_loss / eval_step_cnt)
                 pt_lrs.append(model.pts_lr)
                 tx_lrs.append(model.tx_lr)
                 steps.append(step)
-                eval_step(steps, model, device, dataset, eval_dataset, batch, loss_fn, out, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs)
+                eval_step(steps, model, device, batch, loss_fn, out, tgt, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs)
                 avg_train_loss = 0.
                 eval_step_cnt = 0
-            '''
+
+            out = out.detach().cpu().numpy()
+            tgt = tgt.detach().cpu().numpy()
 
             if ((step - 1) % 200 == 0) and args.eval.save_fig:
                 coord_scale = args.dataset.coord_scale
@@ -549,7 +588,88 @@ def train_step(step, model, batch, loss_fn, args):
     else:
         model.scaler.update()
 
-    return loss.item(), out.detach().cpu().numpy(), tgt.detach().cpu().numpy()
+    return loss.item(), out, tgt
+
+def eval_step(steps, model, device, batch, loss_fn, train_out, train_tgt, args, train_losses, eval_losses, eval_psnrs, pt_lrs, tx_lrs):
+    step = steps[-1]
+    tgt, rayo, rayd, c2w = batch
+    
+    with torch.no_grad():
+        eval_loss = loss_fn(train_out, train_tgt)
+        eval_psnr = -10. * np.log(((train_out - train_tgt)**2).mean().item()) / np.log(10.)
+        
+        eval_losses.append(eval_loss.item())
+        eval_psnrs.append(eval_psnr.item())
+
+    model.clear_grad()
+
+    N, H, W, _ = rayd.shape
+    num_pts, _ = model.points.shape
+
+    rand_idx = 0
+    if N > 1:
+        rand_idx = random.randint(1, N-1)
+
+    topk = min([num_pts, model.select_k])
+
+    selected_points = torch.zeros(1, H, W, topk, 3)
+
+    with torch.no_grad():
+        _, attn = model.evaluate(rayo[rand_idx], rayd[rand_idx].unsqueeze(0), c2w[rand_idx], step=step)
+        selected_points = model.selected_points
+
+        print("Eval step:", step, "train_loss:", train_losses[-1], "eval_loss:", eval_losses[-1], "eval_psnr:", eval_psnrs[-1])
+
+        log_dir = os.path.join(args.save_dir, args.index)
+        os.makedirs(log_dir, exist_ok=True)
+        if args.eval.save_fig:
+            os.makedirs(os.path.join(log_dir, "train_main_plots"), exist_ok=True)
+            os.makedirs(os.path.join(log_dir, "train_pcd_plots"), exist_ok=True)
+
+            coord_scale = args.dataset.coord_scale
+            pt_plot_scale = 1.0 * coord_scale  
+
+            # calculate depth, weighted sum the distances from top K points to image plane
+            od = -rayo[rand_idx]
+            D = torch.sum(od * rayo[rand_idx])
+            dists = torch.abs(torch.sum(selected_points.to(od.device) * od, -1) - D) / torch.norm(od)
+            if model.bkg_feats is not None:
+                dists = torch.cat([dists, torch.ones(1, H, W, model.bkg_feats.shape[0]).to(dists.device) * 0], dim=-1)
+            cur_depth = (torch.sum(attn.squeeze(-1).to(od.device) * dists, dim=-1)).detach().cpu()
+
+            train_tgt_rgb = train_tgt[rand_idx].squeeze().cpu().numpy().astype(np.float32)
+            train_pred_rgb = train_out[rand_idx].squeeze().cpu().numpy().astype(np.float32)
+            test_tgt_rgb = train_tgt[0].squeeze().cpu().numpy().astype(np.float32)
+            test_pred_rgb = train_out[0].squeeze().cpu().numpy().astype(np.float32)
+            points_np = model.points.detach().cpu().numpy()
+            depth = cur_depth.squeeze().numpy().astype(np.float32)
+            points_influ_scores_np = None
+            if model.points_influ_scores is not None:
+                points_influ_scores_np = model.points_influ_scores.squeeze().detach().cpu().numpy()
+
+            # main plot
+            main_plot = get_training_main_plot(args.index, steps, train_tgt_rgb, train_pred_rgb, test_tgt_rgb, test_pred_rgb, train_losses, 
+                                            eval_losses, points_np, pt_plot_scale, depth, pt_lrs, tx_lrs, eval_psnrs, points_influ_scores_np)
+            save_name = os.path.join(log_dir, "train_main_plots", "%s_iter_%d.png" % (args.index, step))
+            main_plot.save(save_name)
+
+        # point cloud plot
+        ro = rayo[rand_idx].squeeze().detach().cpu().numpy()
+        rd = rayd[rand_idx].squeeze().detach().cpu().numpy()
+        
+        pcd_plot = get_training_pcd_plot(args.index, steps[-1], ro, rd, points_np, args.dataset.coord_scale, pt_plot_scale, points_influ_scores_np)
+        save_name = os.path.join(log_dir, "train_pcd_plots", "%s_iter_%d.png" % (args.index, step))
+        pcd_plot.save(save_name)
+
+    model.save(step, log_dir)
+    if step % 50000 == 0:
+        torch.save(model.state_dict(), os.path.join(log_dir, "model_%d.pth" % step))
+
+    torch.save(torch.tensor(train_losses), os.path.join(log_dir, "train_losses.pth"))
+    torch.save(torch.tensor(eval_losses), os.path.join(log_dir, "eval_losses.pth"))
+    torch.save(torch.tensor(eval_psnrs), os.path.join(log_dir, "eval_psnrs.pth"))
+
+    return 0
 
 
 if __name__ == "__main__":
@@ -581,7 +701,7 @@ if __name__ == "__main__":
 
     seed_everything(0)
 
-    zero123_cfg = optional_load_config("pikachu_config.yml")
+    zero123_cfg = optional_load_config("chair_config.yml")
     zero123_cfg = SJC_0(**zero123_cfg).dict()
 
     #cfg = argparse_cfg_template(cfg)  # cmdline takes priority
