@@ -35,9 +35,9 @@ geoms:
     select_k_sorted: false
     load_path: ""
     init_type: "cube"
-    init_scale: [1.2, 1.2, 1.2]
+    init_scale: [0.5, 0.5, 0.5]
     init_center: [0.0, 0.0, 0.0]
-    num: 10000
+    num: 400
     influ_init_val: 0.0
     add_type: "random"
     add_k: 3
@@ -182,18 +182,18 @@ models:
         last_act: "none"
         affine_layer: -1
 training:
-  steps: 250000
+  steps: 5000
   prune_steps: 500
-  prune_start: 10000
-  prune_stop: 250000
+  prune_start: 1000
+  prune_stop: 10000
   prune_thresh: 0.0
   prune_thresh_list: []
   prune_steps_list: []
   prune_type: "<"
-  add_steps: 1000
-  add_start: 10000
-  add_stop: 50000
-  add_num: 1000
+  add_steps: 500
+  add_start: 1250
+  add_stop: 10000
+  add_num: 25
   add_num_list: []
   add_steps_list: []
   exclude_keys: []
@@ -229,7 +229,7 @@ training:
       weight_decay: 0
     points:
       type: "cosine"
-      base_lr: 2.0e-3
+      base_lr: 5.0e-3
       factor: 1
       warmup: 0
       weight_decay: 0

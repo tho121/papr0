@@ -6,6 +6,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from imageio import imwrite
 from pydantic import validator
@@ -136,12 +137,10 @@ class SJC_0(BaseConf):
     #    self.papr_losses = papr_losses
     #    self.papr_args = papr_args
 
-papr_batch_size = 12
-papr_steps_per_it = 1000
-papr_train_interval = 500
-
-#1000 zero it = 2000 papr it
-#5000 zeri it = 10000 papr it
+papr_batch_size = 8
+papr_steps_per_it = 10
+papr_train_interval = 10
+papr_target_size = (32,32)
 
 def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_args,
     lr, n_steps, emptiness_scale, emptiness_weight, emptiness_step, emptiness_multiplier,
@@ -196,9 +195,9 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
     os.makedirs(os.path.join(papr_log_dir, "test"), exist_ok=True)
     papr_log_dir = os.path.join(papr_log_dir, "test")
 
-    papr_y_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float16, device=papr_model.device)
+    papr_y_batch = torch.empty((papr_batch_size, papr_target_size[0], papr_target_size[1], 3), dtype=torch.float16, device=papr_model.device)
     papr_ro_batch = torch.empty((papr_batch_size, 3), dtype=torch.float32, device=papr_model.device)
-    papr_rd_batch = torch.empty((papr_batch_size, H, W, 3), dtype=torch.float32, device=papr_model.device)
+    papr_rd_batch = torch.empty((papr_batch_size, papr_target_size[0], papr_target_size[1], 3), dtype=torch.float32, device=papr_model.device)
     papr_c2w_batch = np.empty((papr_batch_size, 4, 4), dtype=np.float64)
 
     coord_scale = papr_args.dataset.coord_scale
@@ -221,24 +220,7 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
                 transforms.CenterCrop((256, 256))
             ])
 
-            #TODO: resize to target rayd size
-            
-            '''
-            import torch.nn.functional as F
-
-            # Assuming rd_ is a tensor with shape [32, 32, 3], we transpose it to [3, 32, 32]
-            rd_ = rd_.permute(2, 0, 1).unsqueeze(0)
-
-            # Now rd_ has a shape of [1, 3, 32, 32], which is [batch_size, channels, height, width]
-            # Use interpolate to resize it to [1, 3, 256, 256]
-            rd_expanded = F.interpolate(rd_, size=(256, 256), mode='bilinear', align_corners=False)
-
-            # After interpolation, we remove the batch dimension and transpose back to [256, 256, 3]
-            rd_expanded = rd_expanded.squeeze(0).permute(1, 2, 0)
-            '''
-
-
-            papr_tforms = transforms.Resize((H, W))
+            papr_tforms = transforms.Resize(papr_target_size)
 
             input_im = tforms(input_image)
 
@@ -329,35 +311,47 @@ def sjc_3d(poser, vox, model: ScoreAdapter, papr_model: PAPR, papr_losses, papr_
             depth_value = depth.clone()
 
             #batch data for PAPR, forward pass when batch filled
-            if papr_train_interval - (i % papr_train_interval) < papr_batch_size:
-                with torch.no_grad():
-                    papr_y = model.decode(y)
-                    papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
+            papr_batch_i = (papr_train_interval - (i % papr_train_interval)) % papr_train_interval
+            if papr_batch_i < papr_batch_size:
 
-                papr_batch_i = (i % papr_train_interval) % papr_batch_size
-                papr_y_batch[papr_batch_i] = papr_y.detach()
+                if papr_batch_i == 0:
+                    papr_y_batch[0] = papr_tforms(input_image).permute(0, 2, 3, 1).detach()
 
-                ro_homogeneous = torch.cat((ro[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
-                ro_scaled = torch.matmul(scaling_matrix, ro_homogeneous.unsqueeze(-1)).squeeze(-1)
+                    ro_homogeneous_ = torch.cat((ro_[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
+                    ro_scaled_ = torch.matmul(scaling_matrix, ro_homogeneous_.unsqueeze(-1)).squeeze(-1)
 
-                papr_ro_batch[papr_batch_i] = ro_scaled[:3]
-                papr_rd_batch[papr_batch_i] = rd.view(H, W, 3).detach()
-                papr_c2w_batch[papr_batch_i] = np.dot(np_scaling_matrix, poses[i])
+                    papr_ro_batch[0] = ro_scaled_[:3]
 
-            if (i + 1) % papr_train_interval == 0:
+                    rd_shaped_ = rd_.detach().view(H, W, 3).permute(2, 0, 1).unsqueeze(0)
+                    rd_expanded = F.interpolate(rd_shaped_, size=papr_target_size, mode='bilinear', align_corners=False)
+                    rd_expanded = rd_expanded.squeeze(0).permute(1, 2, 0)#.view(input_image_size[0] * input_image_size[1], 3)
+                    papr_rd_batch[0] = rd_expanded
 
-                papr_y_batch[0] = papr_tforms(input_image).permute(0, 2, 3, 1).detach()
+                    papr_c2w_batch[0] = np.dot(np_scaling_matrix, input_pose)
 
-                ro_homogeneous_ = torch.cat((ro_[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
-                ro_scaled_ = torch.matmul(scaling_matrix, ro_homogeneous_.unsqueeze(-1)).squeeze(-1)
+                    target_step = papr_steps + papr_steps_per_it
+                    papr_train_and_eval(papr_steps, target_step, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_loss_fn, papr_log_dir, papr_args)
+                    papr_steps += papr_steps_per_it
+                else:
+                    with torch.no_grad():
+                        papr_y = model.decode(y)
+                        papr_y = papr_tforms(papr_y).permute(0, 2, 3, 1)
 
-                papr_ro_batch[0] = ro_scaled_[:3]
-                papr_rd_batch[0] = rd_.view(H, W, 3).detach()
-                papr_c2w_batch[0] = np.dot(np_scaling_matrix, input_pose)
+                    papr_y_batch[papr_batch_i] = papr_y.detach()
 
-                target_step = papr_steps + papr_steps_per_it
-                papr_train_and_eval(papr_steps, target_step, papr_model, model.device, [[papr_y_batch, papr_ro_batch, papr_rd_batch, papr_c2w_batch]], papr_losses, papr_loss_fn, papr_log_dir, papr_args)
-                papr_steps += papr_steps_per_it
+                    ro_homogeneous = torch.cat((ro[0].detach(), torch.ones_like(ro[0][..., :1])), dim=-1)
+                    ro_scaled = torch.matmul(scaling_matrix, ro_homogeneous.unsqueeze(-1)).squeeze(-1)
+
+                    papr_ro_batch[papr_batch_i] = ro_scaled[:3]
+
+                    rd_shaped = rd.detach().view(H, W, 3).permute(2, 0, 1).unsqueeze(0)
+                    rd_expanded = F.interpolate(rd_shaped, size=papr_target_size, mode='bilinear', align_corners=False)
+                    rd_expanded = rd_expanded.squeeze(0).permute(1, 2, 0)#.view(input_image_size[0] * input_image_size[1], 3)
+                    papr_rd_batch[papr_batch_i] = rd_expanded
+
+                    papr_c2w_batch[papr_batch_i] = np.dot(np_scaling_matrix, poses[i])
+
+            
 
             if i % grad_accum == (grad_accum-1):
                 opt.step()
@@ -458,6 +452,11 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
     eval_step_cnt = start_step
     pruned = False
 
+    img_dir = os.path.join(log_dir, "images")
+    os.makedirs(img_dir, exist_ok=True)
+    pc_dir = os.path.join(log_dir, "point_clouds")
+    os.makedirs(pc_dir, exist_ok=True)
+
     print("Start step:", start_step, "Total steps:", target_step)
     start_time = time.time()
     while step < target_step:
@@ -517,7 +516,7 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                 print("Train step:", step, "loss:", loss, "tx_lr:", model.tx_lr, "pts_lr:", model.pts_lr, "scale:", model.scaler.get_scale(), f"time: {time_used:.2f}s")
                 start_time = time.time()
 
-            if (step % args.eval.step == 0) or (step % 500 == 0 and step < 10000):
+            if (step % args.eval.step == 0) or (step % 500 == 0):
                 train_losses.append(avg_train_loss / eval_step_cnt)
                 pt_lrs.append(model.pts_lr)
                 tx_lrs.append(model.tx_lr)
@@ -533,10 +532,38 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                 coord_scale = args.dataset.coord_scale
                 pt_plot_scale = 0.8 * coord_scale
                 
-                img_dir = os.path.join(log_dir, "images")
-                os.makedirs(img_dir, exist_ok=True)
                 out_path = os.path.join(img_dir, f"out_frame_step_{step}.jpg")
 
+                def combine_images_horizontally(images):
+                    widths, heights = zip(*(i.size for i in images))
+                    total_width = sum(widths)
+                    max_height = max(heights)
+                    combined = Image.new('RGB', (total_width, max_height), (255, 255, 255))
+                    x_offset = 0
+                    for im in images:
+                        combined.paste(im, (x_offset, 0))
+                        x_offset += im.size[0]
+                    return combined
+                
+                # Convert the 'out' and 'tgt' lists of arrays to lists of images
+                imgs_out = [Image.fromarray((o * 255).astype('uint8')) for o in out]
+                imgs_tgt = [Image.fromarray((t * 255).astype('uint8')) for t in tgt]
+
+                # Combine all the output images and target images horizontally
+                combined_out = combine_images_horizontally(imgs_out)
+                combined_tgt = combine_images_horizontally(imgs_tgt)
+
+                # Stack the output and target combined images vertically
+                total_width = max(combined_out.size[0], combined_tgt.size[0])
+                total_height = combined_out.size[1] + combined_tgt.size[1]
+                final_image = Image.new('RGB', (total_width, total_height), (255, 255, 255))
+                final_image.paste(combined_out, (0, 0))
+                final_image.paste(combined_tgt, (0, combined_out.size[1]))
+
+                # Save the final image
+                final_image.save(out_path)
+
+                '''
                 #Save model output and target images
                 img1 = Image.fromarray((out[0] * 255).astype('uint8'))
                 img2 = Image.fromarray((tgt[0] * 255).astype('uint8'))
@@ -551,11 +578,9 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
                 combined_image.paste(img2, (width1, 0))
 
                 combined_image.save(out_path)
+                '''
 
                 #save images of point cloud
-
-                pc_dir = os.path.join(log_dir, "point_clouds")
-                os.makedirs(pc_dir, exist_ok=True)
 
                 points_np = model.points.detach().cpu().numpy()
                 points_influ_scores_np = None
@@ -565,12 +590,24 @@ def papr_train_and_eval(start_step, target_step, model, device, data, losses, lo
   
                 image_path = os.path.join(pc_dir, f"pc_frame_step_{step}.png")
                 pcd_plot.save(image_path)
+
+                pc_coords_path = os.path.join(pc_dir, f"pc_coords_frame_step_{step}.txt")
+                np.savetxt(pc_coords_path, points_np, fmt='%f', delimiter=' ')
+
+                filtered_points = points_np[points_influ_scores_np > 0, :]
+                if filtered_points.shape[0] > 0:
+                    filtered_points_path = os.path.join(pc_dir, f"filtered_pc_step_{step}.txt")
+                    np.savetxt(filtered_points_path, filtered_points, fmt='%f', delimiter=' ')
                 
 
             if step >= target_step:
                 break
 
     print("Training finished!")
+
+    points_np = model.points.detach().cpu().numpy()
+    pc_coords_path = os.path.join(pc_dir, f"pc_final.txt")
+    np.savetxt(pc_coords_path, points_np, fmt='%f', delimiter=' ')
 
 def train_step(step, model, batch, loss_fn, args):
     tgt, rayo, rayd, c2w = batch
@@ -620,6 +657,10 @@ def eval_step(steps, model, device, batch, loss_fn, train_out, train_tgt, args, 
 
         print("Eval step:", step, "train_loss:", train_losses[-1], "eval_loss:", eval_losses[-1], "eval_psnr:", eval_psnrs[-1])
 
+        # point cloud plot
+        ro = rayo[rand_idx].squeeze().detach().cpu().numpy()
+        rd = rayd[rand_idx].squeeze().detach().cpu().numpy()
+
         log_dir = os.path.join(args.save_dir, args.index)
         os.makedirs(log_dir, exist_ok=True)
         if args.eval.save_fig:
@@ -649,13 +690,11 @@ def eval_step(steps, model, device, batch, loss_fn, train_out, train_tgt, args, 
 
             # main plot
             main_plot = get_training_main_plot(args.index, steps, train_tgt_rgb, train_pred_rgb, test_tgt_rgb, test_pred_rgb, train_losses, 
-                                            eval_losses, points_np, pt_plot_scale, depth, pt_lrs, tx_lrs, eval_psnrs, points_influ_scores_np)
+                                            eval_losses, points_np, pt_plot_scale, depth, pt_lrs, tx_lrs, eval_psnrs, ro, points_influ_scores_np)
             save_name = os.path.join(log_dir, "train_main_plots", "%s_iter_%d.png" % (args.index, step))
             main_plot.save(save_name)
 
-        # point cloud plot
-        ro = rayo[rand_idx].squeeze().detach().cpu().numpy()
-        rd = rayd[rand_idx].squeeze().detach().cpu().numpy()
+        
         
         pcd_plot = get_training_pcd_plot(args.index, steps[-1], ro, rd, points_np, args.dataset.coord_scale, pt_plot_scale, points_influ_scores_np)
         save_name = os.path.join(log_dir, "train_pcd_plots", "%s_iter_%d.png" % (args.index, step))
